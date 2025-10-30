@@ -44,14 +44,20 @@ Our exploratory analysis confirms the reliability of INRIX traffic data, but fou
 ![traffic-speed-1yr](images/speed_1y.png)
 *Daily average traffic speed along the I-10 Broadway Curve over one year.*
 
+![traffic-speed-by-dow](images/speed_by_dow_lines.png)
+*Average traffic speed by day of week and hour. Weekdays (blue) show clear morning and evening rush hour dips, while weekends (orange) maintain higher speeds throughout the day.*
+
 ![traffic-speed-heatmap](images/speed_dow.png)
-*Average traffic speed (mph) by hour and day of week along the I-10 Broadway Curve.*
+*Average traffic speed (mph) by hour and day of week shown as a heatmap.*
 
 #### Event reporting issue
 Upon reviewing AZ511 event records, we found that updates appear to occur in batch intervals of ~3 hours, and unplanned events are significantly underreported. Several crashes reported in local news were missing from AZ511, which suggests gaps in real-time data capture.
 
+![accidents-by-dow](images/accidents_by_dow_lines.png)
+*Accident/incident reporting patterns by day of week and hour. Clear spikes at 8am, 11am, 2pm, 5pm, and 8pm suggest batch reporting at ~3-hour intervals. Weekdays (blue) show significantly higher reporting than weekends (orange), with Friday evening having the highest peak. The 5pm peak (evening rush hour) is the most prominent across all weekdays.*
+
 ![evt-heatmap](images/reported_accidents_dow.png)
-*Count of all events aggregated by day of week and hour of day*
+*Count of all events aggregated by day of week and hour of day shown as a heatmap*
 
 While some event descriptions contain detailed narratives, the EventSubType field is inconsistently defined, with vague or nonstandard entries (e.g., C34Rshoulder instead of “Crash on right shoulder,” and undefined codes such as T1018). Furthermore, the Severity field is missing in roughly 90% of records, limiting its usefulness for feature engineering. To ensure analytical consistency, we manually reclassified events into two categories—planned (e.g., work zones, closures) and unplanned (e.g., crashes, incidents)—based on their subtype descriptions.
 
@@ -60,9 +66,12 @@ While some event descriptions contain detailed narratives, the EventSubType fiel
 *Distribution of events by subtype and reported severity*
 
 #### Feature Importance
-In addition, we explored feature importance by fitting an XGBoost model (see [Modeling Approach](#modeling-approach)). Result show that lagged travel-time (up to 3 hours) feature dominates model performance, while event-related features contribute the least, which can be another evidence that event reporting may not be in sync with the resulting traffic patterns. The ranking below is based on feature significance (p-values).
-![fi](images/xgb_full_feature_importance_nested_pie.png)
-*Feature importance identified by XGBoost*
+In addition, we explored feature importance by fitting an XGBoost model (see [Modeling Approach](#modeling-approach)). Results show that lagged travel-time (up to 3 hours) features dominate model performance (43.8%), followed by time-of-day patterns (23.6%). Event-related features contribute 15.9% - while this seems low, it reflects that events are rare (< 1% of hours). When events do occur, they have significant impact (shown in counterfactual analysis). The relatively low importance also suggests event reporting may not be in sync with the resulting traffic patterns.
+
+![fi](images/xgb_feature_importance_summary.png)
+*Feature importance identified by XGBoost. Left: Category-level importance shows lag features dominate. Right: Individual features reveal that the most recent hour (Lag 1hr) alone accounts for 33.7% of predictive power.*
+
+**For detailed explanations of all features (what they are, why they matter, how they're engineered), see [FEATURES_GUIDE.md](FEATURES_GUIDE.md).**
 
 
 ## Modeling Approach
@@ -162,39 +171,225 @@ These results are consistent with ADOT’s observations that off-peak closures l
 3. Explore causal inference methods to rigorously estimate the delay impact attributable to multiple interacting factors such as work zones, demand fluctuations, and incidents.
 
 ## Quick Start
-Before running the following commands, make sure to follow the project structure specified in [Description of Repository](#description-of-repository), and have 
-- `az511.db` stored in `database/`, and
-- raw INRIX data stored as `database/inrix-traffic-speed/I10-and-I17-1year/`
 
-Run the entire pipeline end-to-end using the following commands:
+### Prerequisites
+Before running the pipeline, make sure you have:
+- **Environment set up**: Run `conda env create -f environment.yml && conda activate kafka`
+- **AZ511 event data**: `database/az511.db` (created by running `python database/az511.py`)
+- **INRIX traffic data**: Raw CSV files in `database/inrix-traffic-speed/I10-and-I17-1year/`
+  - Required files: `I10-and-I17-1year.csv` and `TMC_Identification.csv`
+
+### Optional: Generate Visualizations for EDA Section
+To create the visualizations shown in the EDA and modeling sections:
 
 ```bash
-# 1) Prepare dataset (events + INRIX -> parquet)
-#    Output: database/i10-broadway/X_full_1h.parquet
-#    - Final feature table with MultiIndex {tmc, time_bin}
-python prepare_i10_training_data.py
+# Generate traffic speed patterns by day of week
+python create_speed_visualization.py
+# Output: images/speed_by_dow_lines.png
 
-# 2) Train tabular baseline models (Linear/Ridge/Lasso, RF/GBRT, XGBoost)
-#    Output: models/tabular_run/
-python train_model_tabular.py --save-models
+# Generate accident/incident reporting patterns by day of week
+python create_accident_visualization.py
+# Output: images/accidents_by_dow_lines.png
 
-# 3) Train sequence model (LSTM)
-#    Output: models/lstm_run/
-python train_model_lstm.py --save-models
-
-# 4) Train spatial-temporal model (GCN + LSTM)
-#    Output: models/gcn/gcn_lstm_i10_wb/
-python train_model_stgnn.py
-
-# 5) Compare model performance and generate evaluation figures
-#    Output: images/
-python model_comparison.py --direction WB --save-figs
-
-# 6) Run counterfactual analysis to estimate delay impact of planned events
-#    Output: images/
-python evt_impact_analysis.py
+# Generate XGBoost feature importance charts (requires trained model)
+python create_feature_importance_viz.py
+# Output: images/xgb_feature_importance_summary.png (and 2 other variants)
 ```
 
+These create clear, publication-ready visualizations:
+- **Speed patterns**: Overlaid line plots showing rush hour dips, weekday vs weekend differences
+- **Accident reporting**: Reveals batch reporting intervals and underreporting on weekends
+- **Feature importance**: Horizontal bar charts (much clearer than pie charts)
+
+### Running the Full Pipeline
+
+The complete workflow consists of six steps that build on each other:
+
+```bash
+# Step 1: Prepare the training dataset
+# Combines AZ511 events with INRIX traffic data, assigns events to road segments (TMCs),
+# creates time-binned features, and outputs a clean parquet file
+python prepare_i10_training_data.py
+# Output: database/i10-broadway/X_full_1h.parquet
+
+# Step 2: Train tabular baseline models
+# Fits Linear Regression, Ridge, Lasso, Random Forest, Gradient Boosting, and XGBoost
+python train_model_tabular.py --save-models
+# Output: models/tabular_run/ (contains trained models + metrics)
+
+# Step 3: Train LSTM sequence model
+# Uses time-series slices to capture temporal dependencies
+python train_model_lstm.py --save-models
+# Output: models/lstm_run/
+
+# Step 4: Train GCN-LSTM spatial-temporal model
+# Combines Graph Convolutional Network (captures spatial relationships between TMCs)
+# with LSTM (captures temporal patterns)
+python train_model_stgnn.py
+# Output: models/gcn/gcn_lstm_i10_wb/
+
+# Step 5: Compare all models
+# Generates heatmaps, RMSE comparisons, and evaluation charts
+python model_comparison.py --direction WB --save-figs
+# Output: images/ (heatmaps, performance charts)
+
+# Step 6: Estimate event-induced delay
+# Uses counterfactual analysis to isolate the impact of roadwork events
+python evt_impact_analysis.py
+# Output: images/ (delay analysis charts)
+```
+
+## How It Works: Step-by-Step Workflow
+
+### Data Collection Phase
+
+**Collect AZ511 Events** (run periodically, e.g., every 3 hours)
+```bash
+python database/az511.py
+```
+- Fetches current roadwork, accidents, closures, and incidents from AZ511 API
+- Stores in `database/az511.db` (SQLite)
+- Updates existing events or inserts new ones based on event ID
+- Timestamps stored as Unix epoch integers
+
+**Collect WZDx Work Zones** (optional, for WZDx-format data)
+```bash
+python database/wzdx.py
+```
+- Fetches work zone data in WZDx (Work Zone Data Exchange) format
+- Stores in `database/workzones.db` with three tables:
+  - `work_zones`: All work zone events
+  - `accidents`: Filtered accident events
+  - `daily_counts`: Cached daily aggregations
+- Uses "lazy update" for counts (only recalculates when dashboard requests data)
+
+### Data Preparation Phase
+
+**Step 1: Prepare Training Data** (`prepare_i10_training_data.py`)
+
+This script does the heavy lifting to create a clean, ML-ready dataset:
+
+1. **Load Events from Database**
+   - Reads `database/az511.db`
+   - Filters to I-10 Broadway Curve area (lat/lon bounding box)
+   - Converts Unix epoch timestamps to datetime
+
+2. **Load INRIX Traffic Data**
+   - Reads large CSV files with minute-level speed observations
+   - Filters to TMC segments within Broadway Curve
+   - Each TMC is a road segment with unique ID, direction, and length
+
+3. **Match Events to Road Segments**
+   - Uses geometric distance calculations to assign each event to nearest TMC
+   - Direction-aware: matches eastbound events to eastbound TMCs
+   - Fallback for unknown directions
+
+4. **Time Binning and Aggregation**
+   - Aggregates INRIX data from minute-level to hourly bins
+   - Creates MultiIndex: `(tmc_code, time_bin)`
+
+5. **Feature Engineering**
+   - **Cyclic time features**: Encode hour/day patterns (sin/cos transforms)
+   - **Event features**: Count of planned vs unplanned events per TMC per hour
+   - **Lag features**: Previous 1-3 hours of travel time (captures momentum)
+   - **Road geometry**: Segment length, on/off ramps, curves (manual tags)
+
+6. **Output**
+   - `X_full_1h.parquet`: Main training data with all features
+   - Optional: `events.parquet`, `inrix.parquet`, `tmc.parquet` for inspection
+
+### Model Training Phase
+
+**Step 2-4: Train Models**
+
+Each training script follows this pattern:
+1. Load `X_full_1h.parquet`
+2. Split data chronologically (train on earlier months, test on later months)
+3. Balance training data (downsample non-event rows since events are rare <1%)
+4. Train model(s)
+5. Evaluate with RMSE, MAE, R² on test set
+6. Save trained models and metrics
+
+**Model Types:**
+- **Tabular**: Treat each `(TMC, time)` pair independently, use standard regression
+- **LSTM**: Slice data into sequences, capture temporal dependencies
+- **GCN-LSTM**: Add spatial graph structure (TMCs connected by road network)
+
+**Step 5: Compare Models**
+
+Loads all trained models and generates:
+- Travel time heatmaps (predicted vs actual)
+- RMSE comparison charts
+- Feature importance analysis
+
+**Step 6: Event Impact Analysis**
+
+Uses a counterfactual approach:
+1. Train "full" model with all features (including events)
+2. Train "no-event" model without event data/features
+3. Predict travel time for same inputs using both models
+4. Difference = estimated delay caused by events
+
+Results show planned roadwork adds 10-15 sec/mile delay, with lagged effects 3-5 hours after work begins.
+
+## Key Concepts
+
+### TMC (Traffic Message Channel)
+A TMC is a road segment with a unique identifier used by INRIX. Each TMC represents a stretch of highway with:
+- Start and end coordinates (lat/lon)
+- Direction of travel (eastbound/westbound)
+- Length in miles
+- Reference speed (free-flow speed)
+
+The I-10 Broadway Curve has 50 TMC segments (25 per direction).
+
+### Time Binning
+Traffic data is aggregated into hourly bins. For example:
+- Raw INRIX data: minute-level observations (speed, travel time)
+- After binning: hourly averages (one row per TMC per hour)
+
+This creates a MultiIndex DataFrame: `(tmc_code, time_bin)` where each row represents one TMC segment during one hour.
+
+### Event Categories
+Events from AZ511 are classified into two main groups:
+- **Planned events**: Roadwork, scheduled closures, shoulder work
+- **Unplanned events**: Crashes, debris, accidents, incidents
+
+The model uses these categories as binary features (event present/absent in each time bin).
+
+### Lag Features
+Travel time from previous hours (lag1, lag2, lag3). These are powerful predictors because traffic has momentum - if it's slow now, it's likely to stay slow for the next hour.
+
+### Counterfactual Analysis
+A method to estimate causal impact:
+1. Train a model that includes event information → predicts travel time with events
+2. Train a model without event information → predicts travel time as if no events occurred
+3. Difference between predictions = estimated delay caused by events
+
+## Troubleshooting
+
+**"No valid events data received from API"**
+- Check your `AZ511_API_KEY` in `.env` file
+- Verify internet connection
+- Try manually visiting `https://az511.com/api/v2/get/event?key=YOUR_KEY&format=json`
+
+**"File not found: az511.db"**
+- Run `python database/az511.py` first to collect event data
+- Make sure you're in the project root directory when running scripts
+
+**"KeyError: 'tmc_code'" or missing INRIX data**
+- Ensure INRIX CSV files are in `database/inrix-traffic-speed/I10-and-I17-1year/`
+- Check that `TMC_Identification.csv` and `I10-and-I17-1year.csv` both exist
+- INRIX data is proprietary and not included in this repo
+
+**XGBoost models skipped**
+- Install xgboost: `pip install xgboost` or use conda environment
+- Models will automatically skip if xgboost is not available
+
+**Out of memory errors**
+- INRIX data is large (several GB). Reduce date range in `prepare_i10_training_data.py`
+- Use `--interval 2h` or `--interval 4h` for coarser time bins
+- Close other applications to free up RAM
 
 
 <!-- ## Data Dashboard
