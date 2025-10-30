@@ -59,11 +59,11 @@ Upon reviewing AZ511 event records, we found that updates appear to occur in bat
 ![evt-heatmap](images/reported_accidents_dow.png)
 *Count of all events aggregated by day of week and hour of day shown as a heatmap*
 
-While some event descriptions contain detailed narratives, the EventSubType field is inconsistently defined, with vague or nonstandard entries (e.g., C34Rshoulder instead of “Crash on right shoulder,” and undefined codes such as T1018). Furthermore, the Severity field is missing in roughly 90% of records, limiting its usefulness for feature engineering. To ensure analytical consistency, we manually reclassified events into two categories—planned (e.g., work zones, closures) and unplanned (e.g., crashes, incidents)—based on their subtype descriptions.
+While some event descriptions contain detailed narratives, the EventSubType field is inconsistently defined, with vague or nonstandard entries (e.g., C34Rshoulder instead of "Crash on right shoulder," and undefined codes such as T1018). Furthermore, the Severity field is missing in roughly 62% of records, limiting its usefulness for feature engineering. To ensure analytical consistency, we manually reclassified events into two categories—planned (e.g., work zones, closures) and unplanned (e.g., crashes, incidents)—based on their subtype descriptions.
 
-![evt-heatmap](images/severityxeventsubtype.png)
+![evt-severity](images/severity_summary.png)
 
-*Distribution of events by subtype and reported severity*
+*Severity data quality issues: 62.3% of events have no severity assigned. The top two event types ("Unknown" and "AccidentIncident") have no severity information at all, while specific crash types (right shoulder, accidents) mostly have Minor severity assigned.*
 
 #### Feature Importance
 In addition, we explored feature importance by fitting an XGBoost model (see [Modeling Approach](#modeling-approach)). Results show that lagged travel-time (up to 3 hours) features dominate model performance (43.8%), followed by time-of-day patterns (23.6%). Event-related features contribute 15.9% - while this seems low, it reflects that events are rare (< 1% of hours). When events do occur, they have significant impact (shown in counterfactual analysis). The relatively low importance also suggests event reporting may not be in sync with the resulting traffic patterns.
@@ -194,12 +194,17 @@ python create_accident_visualization.py
 # Generate XGBoost feature importance charts (requires trained model)
 python create_feature_importance_viz.py
 # Output: images/xgb_feature_importance_summary.png (and 2 other variants)
+
+# Generate severity distribution charts
+python create_severity_visualization.py
+# Output: images/severity_summary.png (and 2 other variants)
 ```
 
 These create clear, publication-ready visualizations:
 - **Speed patterns**: Overlaid line plots showing rush hour dips, weekday vs weekend differences
 - **Accident reporting**: Reveals batch reporting intervals and underreporting on weekends
 - **Feature importance**: Horizontal bar charts (much clearer than pie charts)
+- **Severity distribution**: Shows data quality issues (62% missing severity)
 
 ### Running the Full Pipeline
 
