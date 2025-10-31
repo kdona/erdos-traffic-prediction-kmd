@@ -139,4 +139,4 @@ This approach follows best practices from:
 - LSTM Network Architecture (Hochreiter & Schmidhuber, 1997)
 - Feature Engineering for Machine Learning (Zheng & Casari, 2018)
 
-The key insight: **Don't give sequence models features they can compute themselves from the sequence.**
+The key insight: **Don't give sequence models features they can compute  themselves from the sequence.**
