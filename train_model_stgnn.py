@@ -10,6 +10,14 @@ validation and early stopping, runs inference, and saves artifacts:
 - data_object.pt: PyG Data object with tensors and metadata
 - predictions.npz: Predictions, ground truth, time index, TMC order, seq_len
 
+IMPORTANT NOTE ON FEATURES:
+Lag features (lag1, lag2, lag3) are EXCLUDED by design. ST-GNN is a sequence model
+that sees multiple past timesteps through its LSTM component. Including lag features
+would be redundant (the model already has travel time from t-1, t-2, etc. in the sequence)
+and risks overfitting. This design choice is consistent with train_model_lstm.py and
+makes the comparison with tabular models fair: engineered temporal features (lags) vs
+learned temporal representations (LSTM hidden states).
+
 Examples:
   python train_model_stgnn.py --direction WB --save-dir models/gcn/gcn_lstm_i10_wb
   python train_model_stgnn.py --data-path database/i10-broadway --file X_full_1h.parquet --direction EB
@@ -418,6 +426,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory to save model and outputs (default: models/gcn/gcn_lstm_i10_<direction>)",
     )
+    p.add_argument(
+        "--include-lags",
+        action="store_true",
+        help="Include lag features for direct comparison with tabular models. "
+             "NOT recommended (redundant for ST-GNN). Use only to demonstrate "
+             "that performance is similar with/without lags.",
+    )
     return p.parse_args()
 
 
@@ -425,15 +440,48 @@ def main():
     args = parse_args()
     set_seeds(args.seed)
 
-    # Feature specification (mirrors notebook)
+    # Feature specification for ST-GNN (Spatial-Temporal Graph Neural Network)
+    #
+    # IMPORTANT: Lag features (lag1, lag2, lag3) are EXCLUDED by default.
+    #
+    # Why ST-GNN doesn't need explicit lag features:
+    # -----------------------------------------------
+    # ST-GNN is a sequence model that combines:
+    # 1. GCN (Graph Convolutional Network) - learns spatial relationships between road segments
+    # 2. LSTM - learns temporal patterns from sequences of timesteps
+    #
+    # Just like LSTM alone, ST-GNN sees sequences of past timesteps (e.g., t-24 to t-1).
+    # Including lag features would be redundant:
+    # - lag1 (travel time 1 hour ago) is already at position t-1 in the sequence
+    # - The LSTM component learns which past timesteps matter through its hidden states
+    # - Adding explicit lags risks overfitting and adds unnecessary complexity
+    #
+    # This is consistent with the LSTM-only model (train_model_lstm.py) which also
+    # excludes lag features for the same reasons.
+    #
+    # Contrast: Tabular models (XGBoost, RF, Linear) NEED lag features since they
+    # process one timestep at a time without any sequential context.
+    #
+    # Optional --include-lags flag:
+    # Use this ONLY to demonstrate empirically that ST-GNN doesn't benefit from lag features.
     time_features = [
         "hour_sin", "hour_cos", "dow_sin", "dow_cos",
         "hour_of_week_sin", "hour_of_week_cos", "is_weekend"
     ]
     evt_features = ["evt_cat_unplanned", "evt_cat_planned"]
-    lag_features = ["lag1_tt_per_mile", "lag2_tt_per_mile", "lag3_tt_per_mile"]
+    lag_features = ["log_lag1_tt_per_mile", "log_lag2_tt_per_mile", "log_lag3_tt_per_mile"]
     tmc_features = ["miles", "reference_speed", "curve", "onramp", "offramp"]
-    FEATURE_COLS = time_features + evt_features + lag_features + tmc_features
+
+    # Build feature list based on --include-lags flag
+    if args.include_lags:
+        FEATURE_COLS = time_features + evt_features + lag_features + tmc_features  # 17 features (same as tabular)
+        print("NOTE: Including lag features for direct comparison with tabular models.")
+        print("      This is NOT the recommended configuration (redundant features).")
+    else:
+        FEATURE_COLS = time_features + evt_features + tmc_features  # 14 features (recommended)
+        print("Using recommended feature set (no explicit lag features).")
+
+    print(f"Using {len(FEATURE_COLS)} features: {', '.join(FEATURE_COLS)}")
     TARGET_COL = "tt_per_mile"
 
     # TMC order (WB/EB)

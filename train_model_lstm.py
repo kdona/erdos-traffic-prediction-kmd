@@ -14,8 +14,10 @@ What this script does
 - Saves the Keras model and arrays/metadata if requested
 
 Usage (examples)
-- Minimal (defaults, will save artifacts if --save-models is set):
-    python train_model_lstm.py
+- Minimal (defaults, recommended - no lag features):
+    python train_model_lstm.py --save-models
+- With lag features for direct comparison with tabular models:
+    python train_model_lstm.py --include-lags --save-models --output-dir models/lstm_run_with_lags
 - Custom features, output dir, and training budget:
     python train_model_lstm.py \
         --data-path database/i10-broadway/X_full_1h.parquet \
@@ -25,7 +27,14 @@ Usage (examples)
 
 Notes
 - Expects a MultiIndex with levels ('tmc_code','time_bin') or columns with those names to set as index.
-- Default features mirror the notebook (time + event + lag + segment features).
+- IMPORTANT: Lag features (lag1, lag2, lag3) are EXCLUDED by default for LSTM.
+  The LSTM sees sequences of past timesteps, so including lag features would be redundant
+  and risk overfitting. Tabular models (XGBoost, RF) NEED lag features since they only
+  see one timestep at a time. This makes the comparison fair: engineered features (lags)
+  vs learned representations (LSTM memory).
+- Default features: time + events + road geometry (NO explicit lags = 14 features)
+- With --include-lags: time + events + lags + road geometry (17 features, same as tabular models)
+- Use --include-lags ONLY to empirically demonstrate that LSTM doesn't benefit from lag features
 - Set seeds for basic reproducibility; TF determinism may depend on your environment.
 """
 
@@ -92,12 +101,70 @@ def ensure_index(df: pd.DataFrame, tmc_level: str = 'tmc_code', time_level: str 
     raise KeyError("Data must have MultiIndex (tmc_code, time_bin) or columns with those names.")
 
 
-def default_feature_config() -> Dict[str, List[str]]:
+def default_feature_config(include_lags: bool = False) -> Dict[str, List[str]]:
+    """
+    Define feature sets for LSTM model.
+
+    IMPORTANT: Lag features (lag1, lag2, lag3) are EXCLUDED by default for sequence models like LSTM.
+
+    Why LSTMs don't need explicit lag features:
+    ------------------------------------------
+    1. REDUNDANCY: LSTM processes sequences of past timesteps (e.g., t-24 to t-1).
+       The travel time from 1 hour ago (lag1) is already in the sequence at position t-1.
+       Including lag1 as a feature means the model sees the same information twice.
+
+    2. OVERFITTING RISK: Redundant features can lead to:
+       - The model relying too heavily on explicit lags instead of learning patterns
+       - Increased model complexity without benefit
+       - Potential memorization instead of generalization
+
+    3. LSTM'S BUILT-IN MEMORY: The recurrent hidden states capture temporal dependencies
+       automatically. The LSTM learns which past timesteps matter through training.
+
+    Contrast with tabular models:
+    -----------------------------
+    - Tabular models (Linear Regression, Random Forest, XGBoost) see ONE row at a time
+    - They have NO concept of sequence or temporal order
+    - Lag features are ESSENTIAL for them to know "what was traffic like 1-3 hours ago?"
+    - Without lags, tabular models must predict from scratch each hour
+
+    For fair comparison:
+    -------------------
+    - Tabular models use: time + events + lags + road features (engineered temporal info)
+    - LSTM uses: time + events + road features (learns temporal patterns implicitly)
+    - Both approaches capture temporal dependencies, just differently
+
+    Optional --include-lags flag:
+    ----------------------------
+    Use this ONLY to demonstrate empirically that LSTM doesn't benefit from lag features.
+    This allows:
+    1. Direct comparison with tabular models (exact same features)
+    2. Demonstration that performance is similar with/without lags
+    3. Proof that lags are redundant for sequence models
+
+    Default behavior (include_lags=False) is the recommended best practice.
+
+    Args:
+        include_lags: If True, include lag features for direct comparison with tabular models.
+                     Default False (recommended for production).
+    """
     time_features = ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'hour_of_week_sin', 'hour_of_week_cos', 'is_weekend']
     evt_features = ['evt_cat_unplanned', 'evt_cat_planned']
-    lag_features = ['lag1_tt_per_mile', 'lag2_tt_per_mile', 'lag3_tt_per_mile']  # raw lags per notebook
+    lag_features = ['log_lag1_tt_per_mile', 'log_lag2_tt_per_mile', 'log_lag3_tt_per_mile']
     tmc_features = ['miles', 'reference_speed', 'curve', 'onramp', 'offramp']
-    full = time_features + evt_features + lag_features + tmc_features
+
+    # Full feature set for LSTM
+    if include_lags:
+        # Include lags ONLY for direct comparison with tabular models
+        # NOT recommended for production (redundant features)
+        full = time_features + evt_features + lag_features + tmc_features
+        log("NOTE: Including lag features for direct comparison with tabular models.")
+        log("      This is NOT the recommended configuration (redundant features).")
+    else:
+        # Recommended: NO lag features (LSTM learns temporal patterns from sequences)
+        full = time_features + evt_features + tmc_features
+        log("Using recommended feature set (no explicit lag features).")
+
     return {
         'time': time_features,
         'evt': evt_features,
@@ -346,6 +413,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument('--save-models', action='store_true', help='Save Keras model and outputs.')
     parser.add_argument('--feature-cols', type=str, default='',
                         help='Comma-separated feature columns. Defaults to full set used in notebook if empty.')
+    parser.add_argument('--include-lags', action='store_true',
+                        help='Include lag features for direct comparison with tabular models. '
+                             'NOT recommended (redundant for LSTM). Use only to demonstrate '
+                             'that performance is similar with/without lags.')
     return parser.parse_args(argv)
 
 
@@ -367,11 +438,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Features
-    feat_cfg = default_feature_config()
+    feat_cfg = default_feature_config(include_lags=args.include_lags)
     if args.feature_cols:
         feature_cols = [c.strip() for c in args.feature_cols.split(',') if c.strip()]
     else:
         feature_cols = feat_cfg['full']
+
+    log(f"Using {len(feature_cols)} features: {', '.join(feature_cols)}")
 
     missing = [c for c in feature_cols + [args.target_col] if c not in df.columns]
     if missing:

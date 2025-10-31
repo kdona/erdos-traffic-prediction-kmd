@@ -91,19 +91,29 @@ The best-performing model and feature combination were selected to conduct a cou
 [^1]: The training data is a multi-index DataFrame with indices {tmc, time_bin}, where events are counted at each entry. Since events occur in less than 1% of 1-hr time bins, we downsample non-event entries to achieve approximately 50% event balance in the training data.
 
 ### Feature choices
-| Features | Description | 
-|----------|-------------|
-| **Road**  `(miles, on/off ramps, curve)`| Static features related to road geometry each TMC. Some are manually tagged from Google Satellite View |
-| **Events (evt)**  `(evt_cat_planned, evt_cat_unplanned)`| Counts or presence of planned events (closures, roadwork, etc.) and unplanned events (crashes, debris, accidents etc.)|
-|**Cyclic time (cyc)** `(hour_sin, hour_cos, dow_sin, dow_cos, hour_of_week_sin, hour_of_week_cos, is_weekend)`|Encodes daily & weekly periodicity|
-|**Lagged travel time (lag)** `(travel_time_t-1, t-2,...)`|Captures short-term persistence|
+| Features | Description | Used By |
+|----------|-------------|---------|
+| **Road**  `(miles, on/off ramps, curve)`| Static features related to road geometry each TMC. Some are manually tagged from Google Satellite View | All models |
+| **Events (evt)**  `(evt_cat_planned, evt_cat_unplanned)`| Counts or presence of planned events (closures, roadwork, etc.) and unplanned events (crashes, debris, accidents etc.)| All models |
+|**Cyclic time (cyc)** `(hour_sin, hour_cos, dow_sin, dow_cos, hour_of_week_sin, hour_of_week_cos, is_weekend)`|Encodes daily & weekly periodicity| All models |
+|**Lagged travel time (lag)** `(log_lag1_tt_per_mile, log_lag2_tt_per_mile, log_lag3_tt_per_mile)`|Explicit temporal features: travel time from 1-3 hours ago| **Tabular models ONLY** |
 <!-- |**Seasonality** `(P,D,Q,s)`|Explicit periodic autocorrelation|SARIMAX only| -->
+
+**Important:** Lag features are **excluded** from sequence models (LSTM, ST-GNN) because they process sequences of past timesteps directly. Including lag features would be redundant—the travel time from 1 hour ago is already present in the sequence at position t-1. This design choice prevents overfitting and allows each model type to use its optimal feature set.
+
+**Tabular models** (XGBoost, RF, Linear):
+- Full feature set: road + cyc + evt + **lag** (17 features)
+- Lag features are **essential** for capturing temporal patterns
+
+**Sequence models** (LSTM, ST-GNN):
+- Full feature set: road + cyc + evt (14 features, **no lags**)
+- Temporal patterns learned from sequence structure through recurrent states
 
 For each model family in Tabular models, various regressor combinations were tested. The configurations include:
 1. road features only
 2. road + evt
-3. road + evt + lag 
-4. road + lag 
+3. road + evt + lag
+4. road + lag
 5. road + cyc
 6. road + cyc + lag
 7. full features: road + cyc + evt + lag
@@ -113,13 +123,55 @@ For each model family in Tabular models, various regressor combinations were tes
 ## Results
 
 ### Model training results
-![true](images/tabular_models_cv_rmse.png)
 
-*Quick model comparison by CV RMSE*: adding "lag" feature improved the accuracy for all models; "XGBoost" is the overall best model.
+#### Understanding Feature Sets: Tabular vs Sequence Models
 
-![true](images/full_feature_models_cv_rmse.png)
+A critical distinction in model comparison is how different model types handle temporal information:
 
-*Full-feature model comparison by test RMSE*: LSTM has the best prediction accuracy, followed by XGBoost.
+**Tabular Models** (XGBoost, Random Forest, Linear Regression):
+- Process **one row at a time** with no concept of temporal order
+- **Require explicit lag features** (lag1, lag2, lag3) to know past values
+- Feature set: 17 features = time (7) + events (2) + **lags (3)** + road (5)
+
+**Sequence Models** (LSTM, ST-GNN):
+- Process **sequences of past timesteps** through recurrent architecture
+- **Don't need explicit lag features** - past values already in sequence at positions t-1, t-2, t-3
+- Feature set: 14 features = time (7) + events (2) + road (5) **(no lags)**
+
+**Why This Matters:**
+
+Including lag features in sequence models would be redundant—the travel time from 1 hour ago (lag1) is already present in the sequence at position t-1. This redundancy can lead to overfitting where the model over-relies on explicit lags instead of learning temporal patterns through its recurrent states.
+
+We empirically confirmed this by training LSTM models both with and without lag features (using `--include-lags` flag). Performance was nearly identical, proving that sequence models learn temporal dependencies naturally from the sequence structure itself. See [LSTM_LAG_COMPARISON.md](LSTM_LAG_COMPARISON.md) for details.
+
+**Two Types of Comparison:**
+
+1. **Direct Feature Comparison** (same 17 features):
+   - LSTM with lags vs XGBoost with lags
+   - Pure architecture comparison
+   - Optional: train with `python train_model_lstm.py --include-lags --save-models`
+
+2. **Best-Practice Comparison** (optimal features per model):
+   - LSTM without lags (14 features) vs XGBoost with lags (17 features)
+   - Real-world production comparison
+   - Shown below (recommended)
+
+#### Model Performance Comparison
+
+![tabular CV RMSE](images/tabular_models_cv_rmse.png)
+
+*Feature ablation study for tabular models.* Shows how adding different feature sets improves tabular model performance. Lag features provide the largest improvement (43.8% of XGBoost feature importance), confirming they are **essential** for tabular models to capture temporal patterns.
+
+![full models comparison (mixed)](images/full_feature_models_cv_rmse.png)
+
+*Full-feature model comparison (best-practice configuration).* This chart shows each model using its **optimal feature set**:
+- **Tabular models** (Linear, Ridge, Lasso, RF, XGBoost, GBRT): 17 features with explicit lags
+- **Sequence models** (LSTM, ST-GNN): 14 features without explicit lags
+
+The ST-GNN (GCN-LSTM) achieves the best performance by combining:
+- Spatial learning (GCN captures relationships between connected road segments)
+- Temporal learning (LSTM captures patterns across time)
+- No feature engineering needed (learns from raw temporal sequences)
 
 The following travel-time heatmaps visualize the model prediction results using "full" features for XGBoost and LSTM.
 <!-- ![true](images/heatmap_truth_WB.png)
@@ -179,36 +231,34 @@ Before running the pipeline, make sure you have:
 - **INRIX traffic data**: Raw CSV files in `database/inrix-traffic-speed/I10-and-I17-1year/`
   - Required files: `I10-and-I17-1year.csv` and `TMC_Identification.csv`
 
-### Optional: Generate Visualizations for EDA Section
-To create the visualizations shown in the EDA and modeling sections:
+### Optional: Generate All Visualizations
+To recreate all visualizations shown in the EDA, modeling, and results sections:
 
 ```bash
-# Generate traffic speed patterns by day of week
-python create_speed_visualization.py
-# Output: images/speed_by_dow_lines.png
+# Generate ALL plots with one command
+python generate_all_plots.py
+# Output: All images in images/ directory
 
-# Generate accident/incident reporting patterns by day of week
-python create_accident_visualization.py
-# Output: images/accidents_by_dow_lines.png
+# Or generate only fast plots (skip slow data processing)
+python generate_all_plots.py --skip-slow
 
-# Generate XGBoost feature importance charts (requires trained model)
-python create_feature_importance_viz.py
-# Output: images/xgb_feature_importance_summary.png (and 2 other variants)
-
-# Generate severity distribution charts
-python create_severity_visualization.py
-# Output: images/severity_summary.png (and 2 other variants)
+# Or generate only specific plot types
+python generate_all_plots.py --only MODEL_COMP      # Model comparison charts
+python generate_all_plots.py --only TRAVEL_TIME     # Travel time predictions
+python generate_all_plots.py --only EVENT_IMPACT    # Event impact analysis
 ```
 
-These create clear, publication-ready visualizations:
-- **Speed patterns**: Overlaid line plots showing rush hour dips, weekday vs weekend differences
-- **Accident reporting**: Reveals batch reporting intervals and underreporting on weekends
-- **Feature importance**: Horizontal bar charts (much clearer than pie charts)
-- **Severity distribution**: Shows data quality issues (62% missing severity)
+This master script generates all visualizations used in the README:
+- **Day-of-week patterns**: Speed and accident reporting by hour and day
+- **Model comparisons**: Feature ablation, full-feature comparisons, heatmaps
+- **Travel time predictions**: Side-by-side comparisons, error analysis
+- **Event impact**: Delay analysis, correlation plots, heatmaps
+
+**See [VISUALIZATION_SCRIPTS.md](VISUALIZATION_SCRIPTS.md) for detailed documentation.**
 
 ### Running the Full Pipeline
 
-The complete workflow consists of six steps that build on each other:
+The complete workflow consists of five steps that build on each other:
 
 ```bash
 # Step 1: Prepare the training dataset
@@ -233,15 +283,18 @@ python train_model_lstm.py --save-models
 python train_model_stgnn.py
 # Output: models/gcn/gcn_lstm_i10_wb/
 
-# Step 5: Compare all models
-# Generates heatmaps, RMSE comparisons, and evaluation charts
-python model_comparison.py --direction WB --save-figs
-# Output: images/ (heatmaps, performance charts)
 
-# Step 6: Estimate event-induced delay
-# Uses counterfactual analysis to isolate the impact of roadwork events
-python evt_impact_analysis.py
-# Output: images/ (delay analysis charts)
+# Step 5: Generate all visualizations
+# Master script that generates ALL plots shown in README
+python generate_all_plots.py
+# Output: images/ (all plots including heatmaps, RMSE charts, delay analysis, etc.)
+#
+# Alternative: Generate only fast plots (skip day-of-week and event impact)
+# python generate_all_plots.py --skip-slow
+#
+# Alternative: Generate specific plot types
+# python generate_all_plots.py --only MODEL_COMP
+# python generate_all_plots.py --only EVENT_IMPACT
 ```
 
 ## How It Works: Step-by-Step Workflow
@@ -320,14 +373,24 @@ Each training script follows this pattern:
 - **LSTM**: Slice data into sequences, capture temporal dependencies
 - **GCN-LSTM**: Add spatial graph structure (TMCs connected by road network)
 
-**Step 5: Compare Models**
+**Step 5: Generate All Visualizations**
 
-Loads all trained models and generates:
-- Travel time heatmaps (predicted vs actual)
-- RMSE comparison charts
-- Feature importance analysis
+The master script `generate_all_plots.py` orchestrates all visualization generation:
 
-**Step 6: Event Impact Analysis**
+1. **Day-of-week patterns**: Traffic speed and accident reporting patterns by hour and day
+2. **Model comparison**: Feature ablation studies, full-feature comparisons, RMSE heatmaps
+3. **Travel time predictions**: Side-by-side truth vs prediction, error analysis by time/segment
+4. **Event impact analysis**: Counterfactual delay estimation
+5. **Comparison heatmaps**: Time × TMC heatmaps for all models
+
+The script provides flexible options:
+- Generate all plots: `python generate_all_plots.py`
+- Skip slow plots: `python generate_all_plots.py --skip-slow`
+- Generate specific types: `python generate_all_plots.py --only MODEL_COMP`
+
+All outputs are saved to `images/` directory.
+
+**Event Impact Analysis (included in Step 5)**
 
 Uses a counterfactual approach:
 1. Train "full" model with all features (including events)
@@ -480,12 +543,18 @@ wzdx/
 │   └── tabular_run/             # Training results for LR and Tree-based models using tabular data
 ├── notebooks/                   # EDA and adhoc scripts
 ├── src/                         # Generic helper utilities
-├── evt_impact_analysis.py       # Script to 
-├── model_comparison.py          # Script to
-├── prepare_i10_training_data.py # Script to prepare the dataset (events + INRIX -> parquet)
-├── train_model_lstm.py          # Script to train LSTM
-├── train_model_stgnn.py         # Script to train ST‑GNN
-└── train_model_tabular.py       # Script to train tabular baselines (Linear/Ridge/Lasso, RF/GBRT, XGBoost)
+├── generate_all_plots.py        # Master script to generate ALL visualizations
+├── visualization_utils.py       # Shared utilities for plotting (colors, markers, styles)
+├── create_day_of_week_viz.py    # Generate day-of-week patterns (speed + accidents)
+├── create_model_comparison_viz.py  # Generate model comparison charts
+├── create_travel_time_viz.py    # Generate travel time prediction visualizations
+├── evt_impact_analysis.py       # Event impact counterfactual analysis
+├── model_comparison.py          # Comprehensive model comparison with heatmaps
+├── manage.py                    # CLI wrapper for common operations
+├── prepare_i10_training_data.py # Prepare the dataset (events + INRIX → parquet)
+├── train_model_lstm.py          # Train LSTM sequence model
+├── train_model_stgnn.py         # Train ST-GNN (GCN-LSTM) spatial-temporal model
+└── train_model_tabular.py       # Train tabular baselines (Linear/Ridge/Lasso, RF/GBRT, XGBoost)
 ```
 
 <!-- ## Data Access

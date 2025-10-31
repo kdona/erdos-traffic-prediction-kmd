@@ -35,6 +35,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 import torch
+from src.eval import compute_log_rmse, compute_log_rmse_masked, align_sequence_predictions
 
 # ---------------------------
 # CLI
@@ -78,7 +79,11 @@ def tmc_order(direction: str) -> List[str]:
         ]
 
 
-def feature_sets() -> Dict[str, List[str]]:
+def feature_sets() -> Dict[str, Dict[str, List[str]]]:
+    """
+    Define feature sets for both tabular and sequence models.
+    Tabular models use explicit lag features, while sequence models learn temporal patterns directly.
+    """
     time_features = [
         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
         'hour_of_week_sin', 'hour_of_week_cos', 'is_weekend'
@@ -86,16 +91,29 @@ def feature_sets() -> Dict[str, List[str]]:
     evt_features = ['evt_cat_unplanned', 'evt_cat_planned']
     lag_features = ['log_lag1_tt_per_mile', 'log_lag2_tt_per_mile', 'log_lag3_tt_per_mile']
     tmc_features = ['miles', 'reference_speed', 'curve', 'onramp', 'offramp']
-    full_features = time_features + evt_features + lag_features + tmc_features
-
-    return {
+    
+    # Tabular models - need explicit lag features
+    tabular = {
         'base': tmc_features,
         'base_lags': tmc_features + lag_features,
-        'full': full_features,
-        'cyc': time_features + tmc_features,
-        'cyc_lags': time_features + tmc_features + lag_features,
         'evt': evt_features + tmc_features,
         'evt_lags': evt_features + tmc_features + lag_features,
+        'cyc': time_features + tmc_features,
+        'cyc_lags': time_features + tmc_features + lag_features,
+        'full': time_features + evt_features + lag_features + tmc_features
+    }
+
+    # Sequence models - learn patterns from raw sequences
+    sequence = {
+        'base': tmc_features,
+        'evt': evt_features + tmc_features,
+        'cyc': time_features + tmc_features,
+        'full': time_features + evt_features + tmc_features  # No lag features needed
+    }
+
+    return {
+        'tabular': tabular,
+        'sequence': sequence
     }
 
 
@@ -269,9 +287,8 @@ def load_lstm_preds(lstm_dir: Path) -> Optional[Dict[str, np.ndarray]]:
 # Metrics & plotting
 # ---------------------------
 
-def compute_log_rmse(y_log_true: np.ndarray, y_log_pred: np.ndarray) -> float:
-    from sklearn.metrics import root_mean_squared_error as rmse
-    return rmse(y_log_true.flatten(), y_log_pred.flatten())
+# compute_log_rmse and compute_log_rmse_masked are provided by `src.eval`
+# (imported near the top of this file)
 
 
 def to_heatmap_df(Z: np.ndarray, time_index: List, order: List[str]) -> pd.DataFrame:
@@ -324,8 +341,9 @@ def main():
     tabular_rmse: Dict[str, float] = {}
     full_rmse: Dict[str, float] = {}
 
-    # 1) Tabular models
+    # 1) Tabular models - use tabular feature sets (with lags)
     feats = feature_sets()
+    tabular_feats = feats['tabular']
     tabular_models = discover_tabular_models(args.tabular_model_dir)
     # Load cv metrics directly from CSV (or fallback)
     tab_cv = load_tabular_cv_metrics(args.tabular_metrics)
@@ -334,9 +352,11 @@ def main():
     tabular_rmse = {k: float(v) for k, v in tab_cv.items()}
     # Extract full-feature subset for the second chart
     for name, val in tab_cv.items():
+        # Only compare models using their appropriate feature sets
         if "_full" in name:
             prefix = name.split("_", 1)[0]
-            full_rmse[f"{prefix}_full"] = float(val)
+            if prefix in ['lr', 'rf', 'xgb', 'gbrt']:  # Tabular models
+                full_rmse[f"{prefix}_full"] = float(val)
 
     # 2) ST-GNN (GCN-LSTM)
     # Use best validation error from metrics.json to populate the full-feature bar chart,
@@ -428,17 +448,42 @@ def main():
                           var_name='dataset', value_name='rmse')
         df_melt = df_melt.sort_values(by='rmse')
 
-        plt.figure(figsize=(8,3))
+        # Create two subplots for tabular vs sequence models
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # Tabular models (with lag features)
+        tabular_models = ['Linear Regression', 'Random Forest', 'XGBoost', 'Gradient Boosting']
+        df_tabular = df_melt[
+            (df_melt['dataset'] == 'cv_rmse') & 
+            (df_melt['model'].isin(tabular_models))
+        ]
         sns.barplot(
-            data=df_melt[df_melt['dataset'] == 'cv_rmse'],
+            data=df_tabular,
             x='features', y='rmse', hue='model',
-            # palette='Set2'
+            ax=ax1
         )
-        plt.title('CV RMSE by Model and Feature Set')
-        plt.ylabel('RMSE')
-        plt.xlabel('Feature Set')
-        plt.xticks(rotation=45, ha='right')
-        plt.legend(title='Model', bbox_to_anchor=(1.002, 1), loc='upper left', borderaxespad=0)
+        ax1.set_title('Tabular Models\n(with lag features)')
+        ax1.set_xlabel('Feature Set')
+        ax1.set_ylabel('RMSE')
+        ax1.tick_params(axis='x', rotation=45)
+        
+        # Sequence models (without lag features)
+        sequence_models = ['LSTM', 'ST-GNN']
+        df_sequence = df_melt[
+            (df_melt['dataset'] == 'cv_rmse') & 
+            (df_melt['model'].isin(sequence_models))
+        ]
+        sns.barplot(
+            data=df_sequence,
+            x='features', y='rmse', hue='model',
+            ax=ax2
+        )
+        ax2.set_title('Sequence Models\n(no lag features)')
+        ax2.set_xlabel('Feature Set')
+        ax2.set_ylabel('RMSE')
+        ax2.tick_params(axis='x', rotation=45)
+        
+        plt.suptitle('CV RMSE by Model Type and Feature Set', y=1.05)
         plt.tight_layout()
         if args.save_figs:
             images_dir.mkdir(parents=True, exist_ok=True)
