@@ -150,7 +150,7 @@ def default_feature_config(include_lags: bool = False) -> Dict[str, List[str]]:
     """
     time_features = ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'hour_of_week_sin', 'hour_of_week_cos', 'is_weekend']
     evt_features = ['evt_cat_unplanned', 'evt_cat_planned']
-    lag_features = ['log_lag1_tt_per_mile', 'log_lag2_tt_per_mile', 'log_lag3_tt_per_mile']
+    lag_features = ['lag1_tt_per_mile', 'lag2_tt_per_mile', 'lag3_tt_per_mile']
     tmc_features = ['miles', 'reference_speed', 'curve', 'onramp', 'offramp']
 
     # Full feature set for LSTM

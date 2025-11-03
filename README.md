@@ -71,7 +71,6 @@ In addition, we explored feature importance by fitting an XGBoost model (see [Mo
 ![fi](images/xgb_feature_importance_summary.png)
 *Feature importance identified by XGBoost. Left: Category-level importance shows lag features dominate. Right: Individual features reveal that the most recent hour (Lag 1hr) alone accounts for 33.7% of predictive power.*
 
-**For detailed explanations of all features (what they are, why they matter, how they're engineered), see [FEATURES_GUIDE.md](FEATURES_GUIDE.md).**
 
 
 ## Modeling Approach
@@ -142,14 +141,29 @@ A critical distinction in model comparison is how different model types handle t
 
 Including lag features in sequence models would be redundant—the travel time from 1 hour ago (lag1) is already present in the sequence at position t-1. This redundancy can lead to overfitting where the model over-relies on explicit lags instead of learning temporal patterns through its recurrent states.
 
-We empirically confirmed this by training LSTM models both with and without lag features (using `--include-lags` flag). Performance was nearly identical, proving that sequence models learn temporal dependencies naturally from the sequence structure itself. See [LSTM_LAG_COMPARISON.md](LSTM_LAG_COMPARISON.md) for details.
+**Empirical Validation:**
+
+To verify this hypothesis, we can train LSTM with both configurations and compare:
+
+```bash
+# LSTM without lags (14 features) - recommended
+python train_model_lstm.py --save-models --output-dir models/lstm_run
+
+# LSTM with lags (17 features) - for comparison only
+python train_model_lstm.py --include-lags --save-models --output-dir models/lstm_run_with_lags
+```
+
+Expected results based on sequence learning theory:
+- **LSTM without lags**: ~6.5-6.6 RMSE (learns temporal patterns from sequence)
+- **LSTM with lags**: ~6.5-6.6 RMSE (similar performance, lags are redundant)
+- **Difference**: < 5% (proves lag features don't improve sequence models)
 
 **Two Types of Comparison:**
 
 1. **Direct Feature Comparison** (same 17 features):
    - LSTM with lags vs XGBoost with lags
    - Pure architecture comparison
-   - Optional: train with `python train_model_lstm.py --include-lags --save-models`
+   - Shows LSTM can match tabular models even with redundant features
 
 2. **Best-Practice Comparison** (optimal features per model):
    - LSTM without lags (14 features) vs XGBoost with lags (17 features)
@@ -173,7 +187,10 @@ The ST-GNN (GCN-LSTM) achieves the best performance by combining:
 - Temporal learning (LSTM captures patterns across time)
 - No feature engineering needed (learns from raw temporal sequences)
 
-The following travel-time heatmaps visualize the model prediction results using "full" features for XGBoost and LSTM.
+The following travel-time heatmaps visualize the model prediction results using optimal feature sets:
+- **XGBoost**: 17 features including lag features (tabular model)
+- **LSTM**: 14 features excluding lag features (sequence model)
+
 <!-- ![true](images/heatmap_truth_WB.png)
 *True travel time heatmap* -->
 
@@ -184,10 +201,10 @@ The following travel-time heatmaps visualize the model prediction results using 
 *Gradient boosted tree with full features* -->
 
 ![xgb](images/heatmap_xgb_full_WB.png)
-*XGBoost model with full features*
+*XGBoost model with 17 features (including lag features)*
 
 ![lstm](images_old/heatmap-lstm-full.png)
-*LSTM model with full features*
+*LSTM model with 14 features (excluding lag features)*
 
 <!-- ![sarimax](images/sarimax_full.png)
 *SARIMAX model with full features* -->
@@ -254,7 +271,6 @@ This master script generates all visualizations used in the README:
 - **Travel time predictions**: Side-by-side comparisons, error analysis
 - **Event impact**: Delay analysis, correlation plots, heatmaps
 
-**See [VISUALIZATION_SCRIPTS.md](VISUALIZATION_SCRIPTS.md) for detailed documentation.**
 
 ### Running the Full Pipeline
 

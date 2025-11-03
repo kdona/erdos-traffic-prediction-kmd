@@ -120,16 +120,15 @@ def create_full_feature_comparison(df):
                     'family': 'Sequence Models'
                 })
 
-    # Load GCN-LSTM metrics
+    # Load ST-GNN (GCN-LSTM) metrics
     if gcn_metrics_path.exists():
         with open(gcn_metrics_path, 'r') as f:
             data = json.load(f)
-            gcn_loss = data.get("train_loss", None)
-            if gcn_loss is not None:
-                gcn_cv = float(np.sqrt(np.min(np.array(gcn_loss, dtype=float))))
+            gcn_val = data.get("best_val", None)
+            if gcn_val is not None:
                 extra_models.append({
                     'model_feat': 'gnn_full',
-                    'cv_rmse': gcn_cv,
+                    'cv_rmse': float(np.sqrt(gcn_val)),
                     'model_display': 'ST-GNN',
                     'family': 'Sequence Models'
                 })
