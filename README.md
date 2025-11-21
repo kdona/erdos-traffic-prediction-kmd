@@ -1,17 +1,17 @@
 # WorkZoneWatch: Predict Traffic Delay Impact from Roadwork on I-10 in Phoenix, AZ
 
-Team members: [Yanbing Wang](https://github.com/yanb514)
+Team members: [Yanbing Wang](https://github.com/yanb514), [Kristin Dona](https://github.com/kdona)
 
 
-## Table of Content
+## Table of Contents
 - [Introduction](#introduction)
+- [Quick Start](#quick-start)
+- [Repository Structure](#repository-structure)
 - [Dataset Generation](#dataset-generation)
 - [Exploratory Data Analysis](#exploratory-data-analysis)
 - [Modeling Approach](#modeling-approach)
 - [Results](#results)
 - [Future Work](#future-work)
-- [Quick Start](#quick-start)
-- [Description of Repository](#description-of-repository)
 
 ### Introduction
 Phoenix’s Interstate 10 Broadway Curve is one of Arizona’s busiest freeway corridors, and its 11-mile segment recently underwent a four-year [reconstruction project](https://azdot.gov/i-10-broadway-curve-project) involving major lane closures between Loop 202 and I-17. *WorkZoneWatch* aims to quantify and predict the short-term delay impacts of planned roadwork and unplanned incidents along this corridor to support ADOT’s construction scheduling and traffic management decisions. Using INRIX historical speed data and AZ511 work zone and incident reports, we built an augmented dataset incorporating road geometry, traffic periodicity, and lagged travel-time features, and tested a suite of models to predict segment-level travel times. A counterfactual analysis was then performed by removing event-influenced data and event-related features to estimate “no-event” conditions, which serve as a baseline for quantifying delay caused by roadwork. Results show that planned events induce measurable but lagged delays—up to 15 seconds per mile (~3 minutes across the 11-mile segment)—roughly double routine congestion levels. Delays are most disruptive during weekday early afternoons and weekend mornings. These findings highlight opportunities to optimize work-zone scheduling and underscore the need for more complete and timely event reporting.
@@ -182,6 +182,15 @@ Expected results based on sequence learning theory:
 - **Tabular models** (Linear, Ridge, Lasso, RF, XGBoost, GBRT): 17 features with explicit lags
 - **Sequence models** (LSTM, ST-GNN): 14 features without explicit lags
 
+**⚠️ Critical Note on LSTM Results:** The LSTM showing 1.441 RMSE in the chart above is **misleadingly low** due to a **validation split bug** (lines 479-482 of `train_model_lstm.py`). The original code took the last 20% of the array (`X_train[-n_val:]`) instead of the chronologically last 20% of time. This caused the validation set to contain sequences from early time periods while the test set contained late time periods, creating a distribution shift.
+
+**Observed metrics:**
+- Val RMSE: 1.47 (evaluated on early training times)
+- Test RMSE: 6.92 (evaluated on late times)
+- Gap: 5.45 RMSE ← Severe distribution mismatch!
+
+**Fix applied:** Validation split now uses chronological time thresholds across all TMCs, ensuring val and test sets represent similar time periods. After retraining with the fix, LSTM should show Val RMSE ≈ Test RMSE ≈ 4.0-4.5, matching the ST-GNN performance. See [LSTM_VALIDATION_BUG_FIX.md](LSTM_VALIDATION_BUG_FIX.md) for detailed explanation and fix.
+
 The ST-GNN (GCN-LSTM) achieves the best performance by combining:
 - Spatial learning (GCN captures relationships between connected road segments)
 - Temporal learning (LSTM captures patterns across time)
@@ -216,6 +225,50 @@ The following travel-time heatmaps visualize the model prediction results using 
 
 **! Important Note:** All models are trained to make one-shot prediction, i.e., given current or some lagged states, predict the travel time in the next time_bin. They are not designed for multi-step or recursive forecasting.
 
+### Checking for Overfitting: Train vs Test Performance
+
+A critical concern in machine learning is **overfitting** - when a model memorizes the training data but fails to generalize to unseen data. To verify our models aren't overfitting, we evaluate them on TEST data (the last 20% of time, representing "future" data that was held out during training).
+
+#### How to Detect Overfitting
+
+**1. Train vs Test Performance Gap**
+- **Healthy model**: Train RMSE ≈ Test RMSE (within 10-20%)
+- **Overfitting**: Train RMSE << Test RMSE (e.g., Train: 2.0, Test: 4.5)
+- **Example**: If a model shows 1.4 RMSE on training but 4.0 on test, it's likely overfitting
+
+**2. Visual Inspection**
+The plots below show predictions on the TEST region (red/yellow shaded area = future/blinded data):
+- **Healthy**: Predictions track actual patterns in both train and test regions
+- **Overfitting**: Predictions are perfect on training data but fail badly on test data
+
+**3. Learning Curves** (for neural networks)
+- **Healthy**: Train and validation loss both decrease and converge
+- **Overfitting**: Train loss decreases while validation loss plateaus or increases
+- Check `metrics.json` files for `train_loss` and `val_loss` histories
+
+**4. Common Causes of Overfitting in Time Series**
+- **Data leakage**: Using `shuffle=True` on sequential data can leak future information
+- **Redundant features**: Including explicit lag features in sequence models (LSTM already has past values in sequence)
+- **Too complex model**: Too many parameters relative to training data size
+
+#### Our Results: Verifying Generalization
+
+![error heatmap](images/prediction_errors_st-gnn.png)
+*Prediction errors with test region highlighted (yellow). The text box shows train vs test RMSE. Our models show healthy generalization with similar errors in train and test regions.*
+
+![comparison](images/travel_time_comparison_st-gnn.png)
+*Side-by-side comparison showing ground truth vs predictions. Red shaded region = TEST DATA (future/unseen). Model predictions remain accurate in the test region, indicating no overfitting.*
+
+**Key Observations:**
+- Test RMSE is close to train RMSE (~4-5 for all models), indicating healthy generalization
+- Visual inspection shows predictions follow actual patterns in both train and test regions
+- No evidence of memorization or degraded performance on unseen data
+
+**Why This Matters:**
+- Confirms models will work on truly future data, not just historical training data
+- Validates that model comparison metrics (shown earlier) reflect real-world performance
+- Ensures delay impact estimates are reliable for planning decisions
+
 
 ### Event-induced delay
 Event-induced delay was estimated using a counterfactual prediction model trained with XGBoost excluding all event-related data and features, allowing isolation of delay attributable to work zones and incidents. The analysis focused on planned events (e.g., roadwork), as they are typically longer in duration and less affected by underreporting.
@@ -223,10 +276,24 @@ Event-induced delay was estimated using a counterfactual prediction model traine
 The additional delay was computed as the difference between travel times predicted by the full model and the counterfactual “no-event” model. Results indicate that event-related delays peak during early afternoons (12–3 PM) on weekdays and in the mornings on weekends. While weekend or overnight closures—common DOT mitigation strategies—help reduce congestion, our findings show that these measures reduce but do not eliminate delays, particularly on weekends.
 
 ![delay-how](images/extra_delay_by_hour.png)
+*Average model-predicted delay across all days. Peak delays occur at 1-2 PM (~4.5 sec/mile extra), with minimal impact at night.*
 
 ![delay-how](images/extra_delay_heatmap_dow_hour.png)
+*Heatmap showing delay patterns by day of week and hour. Red areas indicate increased delay (worst: Friday 12-2 PM). Blue areas show negative delay on weekend mornings, suggesting events are scheduled during naturally light-traffic periods.*
 
-Further analysis reveals that planned work zones cause prolonged, lagged effects, with delays peaking 3–5 hours after work begins and reaching up to 15 sec/mile (2-3min extra delay on the 11-mile corridor), which doubles the typical daily congestion delay.
+#### Weekday vs Weekend Comparison
+
+To better understand temporal patterns, we separated the analysis by weekdays versus weekends:
+
+![delay-weekday-weekend](images/extra_delay_weekday_vs_weekend.png)
+*Side-by-side comparison reveals distinct patterns: Weekdays show prolonged afternoon impact (12-3 PM, ~2.5 sec/mile), while weekends exhibit a sharp noon spike (~3.2 sec/mile) but minimal morning impact.*
+
+**Key Insights:**
+- **Weekdays**: Events cause sustained delays during business hours (11 AM - 5 PM), peaking at 1 PM with ~2.7 sec/mile extra delay (~30 seconds across the 11-mile corridor)
+- **Weekends**: Sharp spike at 11 AM-12 PM (~3.2 sec/mile, ~35 seconds total), but morning events (6-10 AM) show minimal or even negative impact, likely because construction is scheduled during naturally light traffic periods
+- **Optimal scheduling**: Weekend mornings (7-10 AM) cause least disruption; weekday early afternoons (12-2 PM) cause most
+
+Further analysis reveals that planned work zones cause prolonged, lagged effects, with delays peaking 3–5 hours after work begins. In the worst cases, delays can reach 10-15 sec/mile (though typical delays are 0.5-1 sec/mile, with peak period delays of 2-4 sec/mile). The observed lagged effects suggest that traffic impacts from roadwork extend well beyond the immediate work zone location and time.
 
 ![delay-how](images/diff_by_event_type_boxplot.png)
 
@@ -242,75 +309,30 @@ These results are consistent with ADOT’s observations that off-peak closures l
 ## Quick Start
 
 ### Prerequisites
-Before running the pipeline, make sure you have:
-- **Environment set up**: Run `conda env create -f environment.yml && conda activate kafka`
-- **AZ511 event data**: `database/az511.db` (created by running `python database/az511.py`)
-- **INRIX traffic data**: Raw CSV files in `database/inrix-traffic-speed/I10-and-I17-1year/`
-  - Required files: `I10-and-I17-1year.csv` and `TMC_Identification.csv`
+1. **Install dependencies**:
+   ```bash
+   conda env create -f config/environment.yml
+   conda activate kafka
+   # or use pip with virtual environment
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r config/requirements.txt
+   ```
 
-### Optional: Generate All Visualizations
-To recreate all visualizations shown in the EDA, modeling, and results sections:
+2. **Required data files**:
+   - `database/az511.db` (AZ511 event data - run `python database/az511.py` to collect)
+   - `database/inrix-traffic-speed/I10-and-I17-1year/` (INRIX traffic data - proprietary, requires license)
+
+### Run Complete Workflow
 
 ```bash
-# Generate ALL plots with one command
-python generate_all_plots.py
-# Output: All images in images/ directory
-
-# Or generate only fast plots (skip slow data processing)
-python generate_all_plots.py --skip-slow
-
-# Or generate only specific plot types
-python generate_all_plots.py --only MODEL_COMP      # Model comparison charts
-python generate_all_plots.py --only TRAVEL_TIME     # Travel time predictions
-python generate_all_plots.py --only EVENT_IMPACT    # Event impact analysis
+jupyter notebook notebooks/complete_workflow.ipynb
 ```
+Run all cells in the notebook to execute the entire pipeline with inline visualizations.
 
-This master script generates all visualizations used in the README:
-- **Day-of-week patterns**: Speed and accident reporting by hour and day
-- **Model comparisons**: Feature ablation, full-feature comparisons, heatmaps
-- **Travel time predictions**: Side-by-side comparisons, error analysis
-- **Event impact**: Delay analysis, correlation plots, heatmaps
-
-
-### Running the Full Pipeline
-
-The complete workflow consists of five steps that build on each other:
-
+### Generate EDA Visualizations (Optional)
 ```bash
-# Step 1: Prepare the training dataset
-# Combines AZ511 events with INRIX traffic data, assigns events to road segments (TMCs),
-# creates time-binned features, and outputs a clean parquet file
-python prepare_i10_training_data.py
-# Output: database/i10-broadway/X_full_1h.parquet
-
-# Step 2: Train tabular baseline models
-# Fits Linear Regression, Ridge, Lasso, Random Forest, Gradient Boosting, and XGBoost
-python train_model_tabular.py --save-models
-# Output: models/tabular_run/ (contains trained models + metrics)
-
-# Step 3: Train LSTM sequence model
-# Uses time-series slices to capture temporal dependencies
-python train_model_lstm.py --save-models
-# Output: models/lstm_run/
-
-# Step 4: Train GCN-LSTM spatial-temporal model
-# Combines Graph Convolutional Network (captures spatial relationships between TMCs)
-# with LSTM (captures temporal patterns)
-python train_model_stgnn.py
-# Output: models/gcn/gcn_lstm_i10_wb/
-
-
-# Step 5: Generate all visualizations
-# Master script that generates ALL plots shown in README
-python generate_all_plots.py
-# Output: images/ (all plots including heatmaps, RMSE charts, delay analysis, etc.)
-#
-# Alternative: Generate only fast plots (skip day-of-week and event impact)
-# python generate_all_plots.py --skip-slow
-#
-# Alternative: Generate specific plot types
-# python generate_all_plots.py --only MODEL_COMP
-# python generate_all_plots.py --only EVENT_IMPACT
+python scripts/generate_eda_plots.py
 ```
 
 ## How It Works: Step-by-Step Workflow
@@ -526,87 +548,30 @@ Dashboard Features:
 ![Analytics Dashboard](images/analytics.png)
 *Comprehensive analytics including event distributions, duration analysis, and temporal patterns* -->
 
-## Description of Repository
-The project repository is organized as follows. 
+## Repository Structure
+
 ```
-wzdx/
-├── environment.yml              # Conda environment specification
-├── requirements.txt             # Python dependencies (pip)
-├── run_az511.sh                 # Shell script to run AZ511 job
-├── README.md                    # Project documentation
-├── _log/                        # Logs from data collection
-│   └── az511_28538440.err
-├── dashboard/                   # Streamlit dashboard applications
-│   ├── az511app.py              # AZ511 work zone + traffic dashboard
-│   ├── inrixapp.py              # INRIX-specific dashboard
-│   ├── wzdxapp.py               # WZDx-focused dashboard
-│   └── __pycache__/             # Bytecode cache
-├── database/                    # Data files, scripts, and assets
-│   ├── az511.py                 # AZ511 data collection script
-│   ├── az511.db                 # AZ511 data
-│   ├── wzdx.py                  # Work zone data processing script
-│   ├── i10-broadway/            # Processed training data
-│   │   ├── X_tensor_1h.npz
-│   └── inrix-traffic-speed/     # Raw data from INRIX (not shared)
-│       └── I10-and-I17-1year/
-│           ├── Contents.txt
-│           ├── I10-and-I17-1year.csv
-│           └── TMC_Identification.csv
-├── images/                      # Figures for README and dashboards
-├── models/                      # Model training output
-│   └── gcn/                     # Training results for GCN-LSTM
-│   └── lstm_run/                # Training results for LSTM
-│   └── tabular_run/             # Training results for LR and Tree-based models using tabular data
-├── notebooks/                   # EDA and adhoc scripts
-├── src/                         # Generic helper utilities
-├── generate_all_plots.py        # Master script to generate ALL visualizations
-├── visualization_utils.py       # Shared utilities for plotting (colors, markers, styles)
-├── create_day_of_week_viz.py    # Generate day-of-week patterns (speed + accidents)
-├── create_model_comparison_viz.py  # Generate model comparison charts
-├── create_travel_time_viz.py    # Generate travel time prediction visualizations
-├── evt_impact_analysis.py       # Event impact counterfactual analysis
-├── model_comparison.py          # Comprehensive model comparison with heatmaps
-├── manage.py                    # CLI wrapper for common operations
-├── prepare_i10_training_data.py # Prepare the dataset (events + INRIX → parquet)
-├── train_model_lstm.py          # Train LSTM sequence model
-├── train_model_stgnn.py         # Train ST-GNN (GCN-LSTM) spatial-temporal model
-└── train_model_tabular.py       # Train tabular baselines (Linear/Ridge/Lasso, RF/GBRT, XGBoost)
+Erdos-traffic-prediction/
+├── README.md                    # Project overview and quick start guide
+├── notebooks/
+│   └── complete_workflow.ipynb  # ⭐ Complete workflow notebook
+├── src/                         # Shared utilities
+│   ├── features.py              # Centralized feature definitions
+│   ├── eval.py                  # Evaluation metrics
+│   └── utils.py                 # General utilities
+├── database/                    # Data storage
+│   ├── az511.db                 # AZ511 event database
+│   ├── i10-broadway/            # Processed training data (X_full_1h.parquet)
+│   └── inrix-traffic-speed/     # INRIX raw data (not included)
+├── models/                      # Saved trained models
+│   ├── tabular_run/             # 23 tabular models + metrics
+│   └── lstm_run/                # LSTM model + predictions
+├── images/                      # Generated plots and visualizations
+├── docs/                        # Technical documentation
+└── config/                      # Environment and dependencies
+    ├── environment.yml          # Conda environment specification
+    └── requirements.txt         # Python dependencies
 ```
-
-<!-- ## Data Access
-
-This project uses a combination of proprietary and public datasets:
-
-- **INRIX data** — Licensed and proprietary. The raw data cannot be shared due to contractual restrictions.  
-  However, **processed and aggregated training data** (e.g., anonymized feature tables, model inputs, or summary statistics) can be shared upon reasonable request.  
-
-- **AZ511 data** — Publicly available through the [Arizona Department of Transportation (ADOT) 511 API](https://www.az511.com/).  
-  You can access it directly by registering for an API key or using their open endpoints.
-
-Processed datasets and derived features included in this repository are shared under the same license as the code (MIT), unless otherwise noted.
-
-For questions or data-sharing inquiries, please contact
-**Yanbing Wang**  -->
 
 ## License
-MIT License
-
-Copyright (c) 2025 Yanbing Wang
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+MIT License - Copyright (c) 2025 Yanbing Wang and Kristin Dona

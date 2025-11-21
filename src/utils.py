@@ -29,11 +29,13 @@ except Exception:  # pragma: no cover - optional dependency
 # ==================
 
 def log(s: str) -> None:
+    """Print a timestamped log message. Useful for tracking progress in long-running scripts."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {s}")
 
 
 def ensure_output_dir(path: Path) -> None:
+    """Create directory if it doesn't exist. Like 'mkdir -p' in bash."""
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -42,6 +44,14 @@ def ensure_output_dir(path: Path) -> None:
 # ==================
 
 def load_dataset(data_path: Path) -> pd.DataFrame:
+    """Load the prepared training dataset from parquet file.
+    
+    Args:
+        data_path: Path to X_full_1h.parquet (or similar preprocessed data)
+    
+    Returns:
+        DataFrame with MultiIndex (tmc_code, time_bin) and feature columns
+    """
     if not data_path.exists():
         raise FileNotFoundError(f"Data file not found: {data_path}")
     log(f"Loading dataset: {data_path}")
@@ -68,38 +78,81 @@ def attach_time_index(df: pd.DataFrame, time_col: str = "time_bin") -> pd.DataFr
 
 
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
-    # Create log transforms of existing lag features if present
+    """Apply log transformations to travel time features.
+    
+    Why log transform? Travel times are right-skewed (occasional big delays).
+    Log transform makes the distribution more normal, which helps many models.
+    
+    Creates log_tt_per_mile, log_lag1_tt_per_mile, etc. if the base features exist.
+    """
     for base in ["tt_per_mile", "lag1_tt_per_mile", "lag2_tt_per_mile", "lag3_tt_per_mile"]:
         if base in df.columns:
             out = f"log_{base}"
             if out not in df.columns:
+                # Add small epsilon (1e-6) to avoid log(0)
                 df[out] = np.log(df[base].astype(float) + 1e-6)
     return df
 
 
 def time_split(df: pd.DataFrame, test_ratio: float = 0.2, time_level: str = "time_bin") -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Split data chronologically into train/test sets.
+    
+    IMPORTANT: We use chronological (time-based) splits, not random splits!
+    This simulates real forecasting: train on past data, predict future data.
+    
+    Args:
+        df: DataFrame with MultiIndex including time_level
+        test_ratio: Fraction of time periods to use for testing (default 20%)
+        time_level: Name of the time index level (default "time_bin")
+    
+    Returns:
+        (train_df, test_df) where train comes before test chronologically
+    """
+    # Get unique time bins and sort them chronologically
     time_bins = df.index.get_level_values(time_level).unique().sort_values()
     split_idx = int(len(time_bins) * (1 - test_ratio))
     train_times = time_bins[:split_idx]
     test_times = time_bins[split_idx:]
+    
+    # Use pandas IndexSlice to select all TMCs for specific time periods
     df_train = df.loc[pd.IndexSlice[:, train_times], :]
     df_test = df.loc[pd.IndexSlice[:, test_times], :]
     return df_train, df_test
 
 
 def balance_training(df_train: pd.DataFrame, event_col: str = "evt_total", negative_frac: float = 0.01, seed: int = 42) -> pd.DataFrame:
+    """Balance training data by downsampling non-event periods.
+    
+    Why? Events are rare (~1% of hours have roadwork). Training on unbalanced data
+    can make models just predict "no delay" all the time. This function keeps all
+    event periods but samples only a fraction of non-event periods.
+    
+    Args:
+        df_train: Training dataframe
+        event_col: Column indicating event presence (>0 means event exists)
+        negative_frac: Fraction of non-event rows to keep (0.01 = keep 1%)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        Balanced and shuffled dataframe
+    """
     if event_col not in df_train.columns:
         log(f"Warning: event_col '{event_col}' not in data. Skipping balancing.")
         return df_train.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    
+    # Separate event and non-event periods
     any_event = df_train[event_col] > 0
     df_events = df_train[any_event]
     df_no_events = df_train[~any_event]
-    # Downsample negatives
+    
+    # Downsample non-event periods
     frac = float(negative_frac)
     if frac <= 0 or frac >= 1:
         neg_sample = df_no_events
     else:
         neg_sample = df_no_events.sample(frac=frac, random_state=seed) if len(df_no_events) else df_no_events
+    
+    # Combine and shuffle
     df_balanced = pd.concat([df_events, neg_sample], axis=0)
     log(f"Balanced train: events={len(df_events):,}, non-events(sampled)={len(neg_sample):,}, total={len(df_balanced):,}")
     return df_balanced.sample(frac=1.0, random_state=seed).reset_index(drop=True)
